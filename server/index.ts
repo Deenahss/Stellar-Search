@@ -32,6 +32,7 @@ import {
   USDC_CONTRACT
 } from '../src/lib/constants'
 import { consumePaymentPayload } from '../src/lib/paymentIntegrity'
+import { sanitizeOperatorText } from '../src/lib/logSanitize'
 import {
   normalizeOrganicResults,
   normalizeImageResults,
@@ -416,7 +417,7 @@ app.get('/search', async (req: Request, res: Response) => {
 
     if (!serperRes.ok) {
       const err = await serperRes.text()
-      console.error('[serper]', serperRes.status, err)
+      console.error('[serper]', serperRes.status, sanitizeOperatorText(err))
       const errorBody: ApiErrorResponse = { error: `Serper.dev API error: ${serperRes.status}` }
       return res.status(502).json(errorBody)
     }
@@ -496,7 +497,7 @@ app.get('/search', async (req: Request, res: Response) => {
 
     return res.json(responseBody)
   } catch (err: any) {
-    console.error('[search error]', err.message)
+    console.error('[search error]', sanitizeOperatorText(err.message))
     const errorBody: ApiErrorResponse = { error: 'Search failed. Check server logs.' }
     return res.status(500).json(errorBody)
   }
@@ -530,7 +531,7 @@ app.get('/images', async (req: Request, res: Response) => {
 
     if (!serperRes.ok) {
       const err = await serperRes.text()
-      console.error('[serper images]', serperRes.status, err)
+      console.error('[serper images]', serperRes.status, sanitizeOperatorText(err))
       const errorBody: ApiErrorResponse = { error: `Serper.dev API error: ${serperRes.status}` }
       return res.status(502).json(errorBody)
     }
@@ -560,7 +561,7 @@ app.get('/images', async (req: Request, res: Response) => {
 
     return res.json(responseBody)
   } catch (err: any) {
-    console.error('[images error]', err.message)
+    console.error('[images error]', sanitizeOperatorText(err.message))
     const errorBody: ApiErrorResponse = { error: 'Image search failed. Check server logs.' }
     return res.status(500).json(errorBody)
   }
@@ -607,7 +608,7 @@ app.get('/news', async (req: Request, res: Response) => {
 
     if (!serperRes.ok) {
       const err = await serperRes.text()
-      console.error('[serper news]', serperRes.status, err)
+      console.error('[serper news]', serperRes.status, sanitizeOperatorText(err))
       const errorBody: ApiErrorResponse = { error: `Serper.dev API error: ${serperRes.status}` }
       return res.status(502).json(errorBody)
     }
@@ -637,7 +638,7 @@ app.get('/news', async (req: Request, res: Response) => {
 
     return res.json(responseBody)
   } catch (err: any) {
-    console.error('[news error]', err.message)
+    console.error('[news error]', sanitizeOperatorText(err.message))
     const errorBody: ApiErrorResponse = { error: 'News search failed. Check server logs.' }
     return res.status(500).json(errorBody)
   }
@@ -771,7 +772,7 @@ app.post('/search/batch', async (req: Request, res: Response) => {
       })
       if (!serperRes.ok) {
         const errText = await serperRes.text().catch(() => '')
-        console.error('[serper batch]', serperRes.status, errText)
+        console.error('[serper batch]', serperRes.status, sanitizeOperatorText(errText))
         const evt: BatchJsonlErrorEvent = { v: 1, type: 'error', requestId, index: i, query: q, error: `Serper.dev API error: ${serperRes.status}`, code: 'UPSTREAM_ERROR' }
         writeEvent(evt)
         failed++
@@ -934,7 +935,7 @@ app.post('/jobs', async (req: Request, res: Response) => {
       })
       if (!serperRes.ok) {
         const errText = await serperRes.text().catch(() => '')
-        throw new Error(`Serper.dev API error: ${serperRes.status} ${errText}`)
+        throw new Error(`Serper.dev API error: ${serperRes.status} ${sanitizeOperatorText(errText)}`)
       }
       const data: unknown = await serperRes.json()
       const latencyMs = Date.now() - t0

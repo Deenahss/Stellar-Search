@@ -6,6 +6,7 @@ import {
   AMOUNT_USDC
 } from '../src/lib/constants'
 import { consumePaymentPayload } from '../src/lib/paymentIntegrity'
+import { sanitizeOperatorText } from '../src/lib/logSanitize'
 import { normalizeOrganicResults, normalizeQueryMetadata } from '../src/lib/serperNormalizer'
 import type { SearchResponse, ApiErrorResponse } from '../src/types/index.js'
 
@@ -131,7 +132,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
 
     if (!serperRes.ok) {
       const errText = await serperRes.text()
-      console.error('[serper]', serperRes.status, errText)
+      console.error('[serper]', serperRes.status, sanitizeOperatorText(errText))
       const errorBody: ApiErrorResponse = { error: `Serper.dev API error: ${serperRes.status}` }
       return res.status(502).json(errorBody)
     }
@@ -160,7 +161,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     return res.json(responseBody)
 
   } catch (err: any) {
-    console.error('[search error]', err.message)
+    console.error('[search error]', sanitizeOperatorText(err.message))
     const errorBody: ApiErrorResponse = { error: 'Search failed.' }
     return res.status(500).json(errorBody)
   }

@@ -357,6 +357,24 @@ npm run test:coverage     # run with coverage + thresholds (CI gate)
 
 Reports are generated to `coverage/` (`text`, `json`, `html`, `lcov`). CI uploads the `coverage/` artifact and fails if thresholds are not met.
 
+### Serper normalization fixtures & error mapping (#189)
+
+Serper upstream payloads are normalized deterministically by `src/lib/serperNormalizer.ts` and exercised end-to-end (Express `server/` and Vercel `api/`) against shared fixtures in `server/serperFixtures.ts`:
+
+| Family | Route | Fixtures cover |
+|---|---|---|
+| Organic | `GET /search` | empty arrays, `null`/non-object/wrong-shape payloads, missing/malformed fields, unsafe URLs (`javascript:`, `data:`, `ftp:`, relative, blank), mixed valid+invalid rows, spelling-correction metadata |
+| Images | `GET /images` | empty / `null` / wrong-shape payloads, missing thumbnails/links, malformed dimensions, unsafe `imageUrl`s, mixed rows |
+| News | `GET /news` | empty / `null` / wrong-shape payloads, missing snippets/sources/dates/images, unsafe links, mixed rows |
+
+Stable response-shape contract (asserted by `server/serperNormalization.test.ts` + `api/search.test.ts`):
+
+- **Skipped rows** — any row without a valid `http(s)` link/imageUrl is dropped; result ids are re-indexed from `1`.
+- **Fallbacks** — missing title → `'No title'`, missing snippet/description → `''`, non-string/absent dates → `publishedAt: undefined`, missing source → hostname.
+- **Empty results** — `results: []`, `count: 0`, still HTTP 200 with full x402 metadata.
+- **Upstream errors** — every non-2xx Serper status maps to HTTP 502 with a stable `Serper.dev API error: <status>` body (the raw upstream body is never echoed to clients). Network failures map to 500.
+- **Sanitized operator logs** — upstream error text and generic error messages are passed through `sanitizeOperatorText` (`src/lib/logSanitize.ts`): control characters (including ANSI escapes and newlines) are stripped, whitespace collapsed, and output truncated to 200 chars, so hostile upstream bodies cannot inject into operator logs.
+
 ### Current thresholds (ratchet upward)
 
 Global thresholds are deliberately modest initially and ratchet upward as payment/wallet/API/MCP/UI tests land:
@@ -368,6 +386,8 @@ Global thresholds are deliberately modest initially and ratchet upward as paymen
 | `src/lib/stellar.ts` | 85% | 75% | 85% | 85% |
 | `src/lib/paymentIntegrity.ts` | 90% | 85% | 95% | 90% |
 | `src/lib/serperNormalizer.ts` | 95% | 90% | 100% | 95% |
+| `src/lib/logSanitize.ts` | 95% | 90% | 100% | 95% |
+| `server/serperFixtures.ts` | 100% | 100% | 100% | 100% |
 | `server/corsConfig.ts` | 90% | 85% | 95% | 90% |
 | `src/components/search/SearchBar.tsx` | 80% | 80% | 90% | 80% |
 | `src/components/search/SpellingCorrectionBanner.tsx` | 85% | 90% | 70% | 85% |
