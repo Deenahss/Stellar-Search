@@ -13,7 +13,7 @@
  *   groq-sdk       — Groq AI (Llama 3)
  */
 
-import express, { Request, Response } from 'express'
+import express, { Request, Response, NextFunction } from 'express'
 import cors from 'cors'
 import dotenv from 'dotenv'
 import helmet from 'helmet'
@@ -32,6 +32,15 @@ import {
   USDC_CONTRACT
 } from '../src/lib/constants'
 import { consumePaymentPayload } from '../src/lib/paymentIntegrity'
+import {
+  SEARCH_COUNT,
+  IMAGES_COUNT,
+  NEWS_COUNT,
+  FRESHNESS_TBS,
+  validateCount,
+  validateFreshness,
+} from '../src/lib/paramValidation'
+import type { CountBounds } from '../src/lib/paramValidation'
 import {
   normalizeOrganicResults,
   normalizeImageResults,
@@ -98,6 +107,37 @@ app.use(
 app.use(cors(buildCorsOptions()))
 app.use(express.json())
 app.use(limiter)
+
+// ─── Parameter Validation Middleware (issue #188) ───────────────────────────
+// Paid GET routes validate `q`, `count`, and `freshness` BEFORE the x402
+// payment middleware so invalid input rejects early (400) and never reaches
+// the payment or Serper adapters. Behavior is uniform across routes via the
+// shared helpers in src/lib/paramValidation.ts.
+const PAID_GET_ROUTES: Record<string, { bounds: CountBounds; supportsFreshness: boolean }> = {
+  '/search': { bounds: SEARCH_COUNT, supportsFreshness: true },
+  '/images': { bounds: IMAGES_COUNT, supportsFreshness: false },
+  '/news':   { bounds: NEWS_COUNT,   supportsFreshness: true },
+}
+
+app.use((req: Request, res: Response, next: NextFunction) => {
+  const routeConfig = PAID_GET_ROUTES[req.path]
+  if (!routeConfig || req.method !== 'GET') return next()
+
+  const { q, count, freshness } = req.query as Record<string, unknown>
+
+  const v = validateQuery(q)
+  if (!v.ok) return res.status(400).json({ error: v.error })
+
+  const cv = validateCount(count, routeConfig.bounds)
+  if (!cv.ok) return res.status(400).json({ error: cv.error })
+
+  if (routeConfig.supportsFreshness) {
+    const fv = validateFreshness(freshness)
+    if (!fv.ok) return res.status(400).json({ error: fv.error })
+  }
+
+  next()
+})
 
 // ─── In-memory stats ──────────────────────────────────────────────────────
 const stats = {
@@ -388,21 +428,21 @@ app.get('/search', async (req: Request, res: Response) => {
   const t0 = Date.now()
 
   try {
+    // Re-validate defensively (the pre-payment middleware already did, but
+    // routes must stay safe on their own). Values are guaranteed in-bounds.
+    const cv = validateCount(count, SEARCH_COUNT)
+    if (!cv.ok) return res.status(400).json({ error: cv.error })
+    const fv = validateFreshness(freshness)
+    if (!fv.ok) return res.status(400).json({ error: fv.error })
+
     const requestBody: Record<string, unknown> = {
       q: cleanQ,
-      num: Math.min(parseInt(count) || 5, 20),
+      num: cv.value,
     }
 
     // Add freshness filter if provided (Serper supports date filters)
-    if (freshness) {
-      const dateFilters: Record<string, string> = {
-        'pd': 'qdr:d',  // past day
-        'pw': 'qdr:w',  // past week
-        'pm': 'qdr:m',  // past month
-      }
-      if (dateFilters[freshness]) {
-        requestBody.tbs = dateFilters[freshness]
-      }
+    if (fv.value) {
+      requestBody.tbs = FRESHNESS_TBS[fv.value]
     }
 
     const serperRes = await fetch('https://google.serper.dev/search', {
@@ -516,6 +556,9 @@ app.get('/images', async (req: Request, res: Response) => {
   const t0 = Date.now()
 
   try {
+    const cv = validateCount(count, IMAGES_COUNT)
+    if (!cv.ok) return res.status(400).json({ error: cv.error })
+
     const serperRes = await fetch('https://google.serper.dev/images', {
       method: 'POST',
       headers: {
@@ -524,7 +567,7 @@ app.get('/images', async (req: Request, res: Response) => {
       },
       body: JSON.stringify({
         q: cleanQ,
-        num: Math.min(parseInt(count) || 10, 10),
+        num: cv.value,
       }),
     })
 
@@ -580,20 +623,18 @@ app.get('/news', async (req: Request, res: Response) => {
   const t0 = Date.now()
 
   try {
+    const cv = validateCount(count, NEWS_COUNT)
+    if (!cv.ok) return res.status(400).json({ error: cv.error })
+    const fv = validateFreshness(freshness)
+    if (!fv.ok) return res.status(400).json({ error: fv.error })
+
     const requestBody: Record<string, unknown> = {
       q: cleanQ,
-      num: Math.min(parseInt(count) || 10, 20),
+      num: cv.value,
     }
 
-    if (freshness) {
-      const dateFilters: Record<string, string> = {
-        'pd': 'qdr:d',
-        'pw': 'qdr:w',
-        'pm': 'qdr:m',
-      }
-      if (dateFilters[freshness]) {
-        requestBody.tbs = dateFilters[freshness]
-      }
+    if (fv.value) {
+      requestBody.tbs = FRESHNESS_TBS[fv.value]
     }
 
     const serperRes = await fetch('https://google.serper.dev/news', {
@@ -678,7 +719,12 @@ app.post('/search/batch', async (req: Request, res: Response) => {
     if (!v.ok) return res.status(400).json({ error: `Invalid query "${String(q).slice(0, 30)}": ${v.error}`, index: queries.indexOf(q) })
     cleanQueries.push(v.cleanQ)
   }
-  const parsedCount = Math.min(Math.max(parseInt(String(rawCount ?? '5')) || 5, 1), 20)
+  // Validate count/freshness BEFORE any payment verification or Serper call
+  const cv = validateCount(rawCount, SEARCH_COUNT)
+  if (!cv.ok) return res.status(400).json({ error: cv.error })
+  const fv = validateFreshness(freshness)
+  if (!fv.ok) return res.status(400).json({ error: fv.error })
+  const parsedCount = cv.value
 
   const paymentHeader = (req.headers['payment-signature'] || req.headers['x-payment'] || req.headers['X-PAYMENT'] || req.headers['x-payment-response'] || req.headers['authorization']) as string | undefined
   if (!paymentHeader) {
@@ -759,10 +805,7 @@ app.post('/search/batch', async (req: Request, res: Response) => {
     const t0 = Date.now()
     try {
       const requestBody: Record<string, unknown> = { q, num: parsedCount }
-      if (freshness) {
-        const dateFilters: Record<string, string> = { 'pd': 'qdr:d', 'pw': 'qdr:w', 'pm': 'qdr:m' }
-        if (dateFilters[freshness]) requestBody.tbs = dateFilters[freshness]
-      }
+      if (fv.value) requestBody.tbs = FRESHNESS_TBS[fv.value]
       const serperRes = await fetch('https://google.serper.dev/search', {
         method: 'POST',
         headers: { 'X-API-KEY': SERPER_API_KEY, 'Content-Type': 'application/json' },
@@ -853,7 +896,12 @@ app.post('/jobs', async (req: Request, res: Response) => {
   const v = validateQuery(query)
   if (!v.ok) return res.status(400).json({ error: v.error })
   const cleanQ = v.cleanQ
-  const safeCount = Math.min(Math.max(parseInt(String(count)) || 5, 1), 20)
+  // Validate count/freshness BEFORE any payment verification or Serper call
+  const cv = validateCount(count, SEARCH_COUNT)
+  if (!cv.ok) return res.status(400).json({ error: cv.error })
+  const fv = validateFreshness(freshness)
+  if (!fv.ok) return res.status(400).json({ error: fv.error })
+  const safeCount = cv.value
 
   // Webhook validation (SSRF + https)
   if (webhookUrl) {
@@ -923,10 +971,7 @@ app.post('/jobs', async (req: Request, res: Response) => {
     const t0 = Date.now()
     try {
       const requestBody: Record<string, unknown> = { q: cleanQ, num: safeCount }
-      if (freshness) {
-        const dateFilters: Record<string, string> = { 'pd': 'qdr:d', 'pw': 'qdr:w', 'pm': 'qdr:m' }
-        if (dateFilters[freshness]) requestBody.tbs = dateFilters[freshness]
-      }
+      if (fv.value) requestBody.tbs = FRESHNESS_TBS[fv.value]
       const serperRes = await fetch('https://google.serper.dev/search', {
         method: 'POST',
         headers: { 'X-API-KEY': SERPER_API_KEY, 'Content-Type': 'application/json' },

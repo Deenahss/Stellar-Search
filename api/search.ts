@@ -6,6 +6,7 @@ import {
   AMOUNT_USDC
 } from '../src/lib/constants'
 import { consumePaymentPayload } from '../src/lib/paymentIntegrity'
+import { SEARCH_COUNT, FRESHNESS_TBS, validateCount, validateFreshness } from '../src/lib/paramValidation'
 import { normalizeOrganicResults, normalizeQueryMetadata } from '../src/lib/serperNormalizer'
 import type { SearchResponse, ApiErrorResponse } from '../src/types/index.js'
 
@@ -42,6 +43,20 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
 
   if (!q?.trim()) {
     const errorBody: ApiErrorResponse = { error: 'Missing required parameter: q' }
+    return res.status(400).json(errorBody)
+  }
+
+  // ─── Parameter validation (issue #188) ───────────────────────────────────
+  // Validate count/freshness BEFORE the payment check so invalid input
+  // rejects early and never invokes the payment or Serper adapters.
+  const cv = validateCount(count, SEARCH_COUNT)
+  if (!cv.ok) {
+    const errorBody: ApiErrorResponse = { error: cv.error }
+    return res.status(400).json(errorBody)
+  }
+  const fv = validateFreshness(freshness)
+  if (!fv.ok) {
+    const errorBody: ApiErrorResponse = { error: fv.error }
     return res.status(400).json(errorBody)
   }
 
@@ -108,16 +123,11 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     // ─── Serper.dev ──────────────────────────────────────────────────────────
     const requestBody: Record<string, unknown> = {
       q:   q.trim(),
-      num: Math.min(parseInt(count) || 5, 20),
+      num: cv.value,
     }
 
-    if (freshness) {
-      const dateFilters: Record<string, string> = {
-        pd: 'qdr:d',  // past day
-        pw: 'qdr:w',  // past week
-        pm: 'qdr:m',  // past month
-      }
-      if (dateFilters[freshness]) requestBody.tbs = dateFilters[freshness]
+    if (fv.value) {
+      requestBody.tbs = FRESHNESS_TBS[fv.value]
     }
 
     const serperRes = await fetch('https://google.serper.dev/search', {
