@@ -18,6 +18,16 @@ vi.mock('../src/lib/constants', async () => {
 
 import handler from './search'
 import { resetConsumedPayments } from '../src/lib/paymentIntegrity'
+import {
+  organicEmpty,
+  organicMissingFields,
+  organicUnsafeUrls,
+  organicMixed,
+  organicNull,
+  organicNotAnObject,
+  organicWrongShape,
+  upstreamErrors,
+} from '../server/serperFixtures'
 
 function mockReqRes(overrides: any = {}) {
   const req: any = {
@@ -310,6 +320,103 @@ describe('api/search — Vercel x402 settlement (aligned with Express)', () => {
     expect(res._json.suggestedQuery).toBe('stellar blockchain')
     expect(res._json.isCorrected).toBe(false)
     expect(res._json.query).toBe('stelarr blockchan')
+  })
+})
+
+// ─── Serper normalization & error mapping (deterministic fixtures) ───────────
+
+describe('api/search — Serper normalization & error mapping (fixtures)', () => {
+  let fixtureCounter = 0
+  const fixtureTx = () => Buffer.from(JSON.stringify({ transactionHash: `tx_fixture_${++fixtureCounter}` })).toString('base64')
+
+  it('returns 200 with empty stable results for a completely empty organic array', async () => {
+    global.fetch = vi.fn().mockResolvedValue({ ok: true, json: async () => organicEmpty } as any)
+    const { req, res } = mockReqRes({ method: 'GET', query: { q: 'stellar blockchain' }, headers: { 'x-payment': fixtureTx() } })
+    await handler(req, res)
+    expect(res._json.results).toEqual([])
+    expect(res._json.count).toBe(0)
+    expect(res._json.query).toBe('stellar blockchain')
+    expect(res._json.paidAmount).toBe('0.001')
+    expect(res._json.currency).toBe('USDC')
+  })
+
+  it('handles null, non-object, and wrong-shape payloads as empty results', async () => {
+    for (const payload of [organicNull, organicNotAnObject, organicWrongShape]) {
+      global.fetch = vi.fn().mockResolvedValue({ ok: true, json: async () => payload } as any)
+      const { req, res } = mockReqRes({ method: 'GET', query: { q: 'stellar' }, headers: { 'x-payment': fixtureTx() } })
+      await handler(req, res)
+      expect(res._json.results).toEqual([])
+      expect(res._json.count).toBe(0)
+    }
+  })
+
+  it('drops unsafe links and keeps valid rows in a mixed payload with a stable shape', async () => {
+    global.fetch = vi.fn().mockResolvedValue({ ok: true, json: async () => organicMixed } as any)
+    const { req, res } = mockReqRes({ method: 'GET', query: { q: 'stellar' }, headers: { 'x-payment': fixtureTx() } })
+    await handler(req, res)
+    expect(res._json.count).toBe(2)
+    expect(res._json.results[0]).toEqual({
+      id: '1',
+      title: 'Valid One',
+      url: 'https://example.com/one',
+      description: 'First snippet',
+      source: 'example.com',
+      relevanceScore: 1,
+      publishedAt: '2026-01-01',
+    })
+    expect(res._json.results[1].source).toBe('example.com')
+  })
+
+  it('applies deterministic fallbacks for missing/malformed organic fields', async () => {
+    global.fetch = vi.fn().mockResolvedValue({ ok: true, json: async () => organicMissingFields } as any)
+    const { req, res } = mockReqRes({ method: 'GET', query: { q: 'stellar' }, headers: { 'x-payment': fixtureTx() } })
+    await handler(req, res)
+    expect(res._json.count).toBe(4)
+    expect(res._json.results[0].title).toBe('No title')
+    expect(res._json.results[0].description).toBe('')
+    expect(res._json.results[2].publishedAt).toBeUndefined()
+  })
+
+  it('drops every unsafe URL in a fully unsafe payload', async () => {
+    global.fetch = vi.fn().mockResolvedValue({ ok: true, json: async () => organicUnsafeUrls } as any)
+    const { req, res } = mockReqRes({ method: 'GET', query: { q: 'stellar' }, headers: { 'x-payment': fixtureTx() } })
+    await handler(req, res)
+    expect(res._json.results).toEqual([])
+    expect(res._json.count).toBe(0)
+  })
+
+  it('maps upstream provider errors to a stable 502 and never leaks the raw body', async () => {
+    for (const fx of upstreamErrors) {
+      global.fetch = vi.fn().mockResolvedValue({ ok: false, status: fx.status, text: async () => fx.body } as any)
+      const { req, res } = mockReqRes({ method: 'GET', query: { q: 'stellar' }, headers: { 'x-payment': fixtureTx() } })
+      await handler(req, res)
+      expect(res._status).toBe(fx.expectedStatus)
+      expect(res._json.error).toBe(fx.expectedMessage)
+      expect(res._json.error).not.toContain(fx.body)
+    }
+  })
+
+  it('sanitizes operator log output for hostile upstream error bodies', async () => {
+    const spy = vi.spyOn(console, 'error').mockImplementation(() => {})
+    const hostile = upstreamErrors[upstreamErrors.length - 1]
+    global.fetch = vi.fn().mockResolvedValue({ ok: false, status: hostile.status, text: async () => hostile.body } as any)
+    const { req, res } = mockReqRes({ method: 'GET', query: { q: 'stellar' }, headers: { 'x-payment': fixtureTx() } })
+    await handler(req, res)
+    expect(res._status).toBe(502)
+    const serperLog = spy.mock.calls.find((c) => c[0] === '[serper]')
+    expect(serperLog).toBeDefined()
+    expect(String(serperLog![2])).not.toMatch(/[\x00-\x1F\x7F]/)
+    expect(String(serperLog![2])).not.toContain('\n')
+    expect(String(serperLog![2])).toContain('upstream')
+    spy.mockRestore()
+  })
+
+  it('returns a stable 500 when the network fetch throws', async () => {
+    global.fetch = vi.fn().mockRejectedValue(new Error('ECONNREFUSED'))
+    const { req, res } = mockReqRes({ method: 'GET', query: { q: 'stellar' }, headers: { 'x-payment': fixtureTx() } })
+    await handler(req, res)
+    expect(res._status).toBe(500)
+    expect(res._json.error).toBe('Search failed.')
   })
 })
 
